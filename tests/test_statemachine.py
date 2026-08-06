@@ -188,13 +188,14 @@ def test_clip_boundary_marks_partial(start: float, expect_partial: bool) -> None
     assert live and live[0].partial is expect_partial
 
 
-def test_consecutive_plays_never_overlap() -> None:
-    """The pre-buffer must not reach back over the previous play's end.
+def test_consecutive_plays_are_not_duplicates() -> None:
+    """Neighbouring clips may share padding, but never a whole play.
 
-    Regression: the clamp to the previous end was applied before the buffer was
-    subtracted, so every candidate started `pre_buffer` seconds inside its
-    predecessor. Two kept clips then contained the same footage, and review
-    could not catch it because both looked correct on their own.
+    Overlap is deliberately tolerated: clamping a start forward to avoid it
+    pushes the cut past the snap, which destroys the play, while a second of
+    shared padding costs a moment to skip. What must not happen is one
+    candidate swallowing another entirely -- that is a duplicated play, and it
+    is prevented by anchor merging rather than by clamping.
     """
     times, values = trace(duration_s=140.0)
     add_play(times, values, snap=30.0, duration=6.0, peak=300.0)
@@ -214,6 +215,8 @@ def test_consecutive_plays_never_overlap() -> None:
 
     ordered = sorted(candidates, key=lambda c: c.start)
     for earlier, later in zip(ordered, ordered[1:]):
-        assert later.start >= earlier.end - 1e-6, (
-            f"{later.start:.2f} starts inside {earlier.start:.2f}-{earlier.end:.2f}"
+        assert not (later.start <= earlier.start and later.end >= earlier.end), (
+            f"{later.start:.2f}-{later.end:.2f} swallows "
+            f"{earlier.start:.2f}-{earlier.end:.2f}"
         )
+        assert later.end > earlier.end, "candidates must advance"

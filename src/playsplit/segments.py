@@ -74,6 +74,7 @@ def build(
     #: length once a few plays have been seen on this clip.
     learned: list[float] = []
     learned_median: float | None = None
+    previous_anchor = 0.0
 
     def ignored(time: float) -> bool:
         return any(low <= time <= high for low, high in ignore_ranges)
@@ -130,12 +131,26 @@ def build(
         # clamped start simply undid the clamp and let each candidate reach back
         # over its predecessor's end -- two kept clips then contain the same
         # footage, which review cannot fix because both look correct.
-        emitted_start = max(start - pre_buffer_s, previous_end, 0.0)
+        # Trim forward to the previous anchor, but never past the snap.
+        #
+        # The forward trim is what keeps clips tight: without it the 22s
+        # guarantee always wins and every clip carries ~11s of dead lead-in.
+        # Left unbounded, though, it pushes the start past the snap whenever a
+        # foreign whistle lands shortly before a real one -- at 0.43 precision,
+        # often. So the trim is capped by the contraction estimate, which is
+        # our best available guess at where the ball actually moved. Tight when
+        # the estimator is confident, safe when it is not; the buffer never
+        # wins against the snap.
+        desired = start - pre_buffer_s
+        ceiling = (
+            evidence.snap - pre_buffer_s if evidence.snap is not None else desired
+        )
+        emitted_start = max(min(max(desired, previous_anchor), ceiling), 0.0)
         emitted_end = min(whistle.time + post_buffer_s, clip_duration)
         if evidence.span_conf == "high":
             learned.append(whistle.time - start)
             learned_median = float(np.median(learned))
-        previous_end = emitted_end
+        previous_anchor = whistle.time
         candidates.append(
             Candidate(
                 index=0,

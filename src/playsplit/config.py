@@ -39,7 +39,15 @@ class AudioConfig:
     #: floor (median + k * MAD). Deliberately NOT a high percentile: a
     #: percentile threshold rises with whistle density, so a busy clip would
     #: mask its own whistles -- exactly backwards for a recall-first pipeline.
-    ratio_mad_k: float = 8.0
+    #:
+    #: Lowered 8.0 -> 7.0 once a second game was labelled. 8.0 was fitted to
+    #: one clip; on the noisier GH010009 (audio RMS 0.090 vs 0.077) the higher
+    #: noise floor lifted the absolute threshold and play-end recall fell to
+    #: 10/15, losing a play the pipeline then never saw. That is the original
+    #: percentile bug wearing a different hat: a threshold that adapts to the
+    #: noise still gets stricter exactly where the signal is weaker. 7.0 gives
+    #: full recall on both labelled clips.
+    ratio_mad_k: float = 7.0
     #: Minimum peak-to-mean ratio within the band (narrowband-ness test).
     min_peak_ratio: float = 7.0
     #: A whistle must sustain for at least this long.
