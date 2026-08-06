@@ -77,10 +77,12 @@ class DetectConfig:
 class SegmentConfig:
     """State machine and cutting."""
 
-    #: Fitted to the user's labelling style, not the brief's defaults (5.0/3.0):
-    #: measured ends land a median 0.69s after the whistle, and starts a median
-    #: ~5s before the detected snap.
-    pre_buffer_s: float = 5.0
+    #: Fitted to the user's labelling style, not the brief's defaults (5.0/3.0).
+    #: The pre-buffer shrank from 5.0s once contraction-minimum localisation
+    #: started landing the snap accurately: the old value was compensating for
+    #: a start estimate that ran seconds early, and stacking it on a good
+    #: estimate simply made every clip 5s too long.
+    pre_buffer_s: float = 1.5
     post_buffer_s: float = 0.7
     min_play_s: float = 2.0
     max_play_s: float = 25.0

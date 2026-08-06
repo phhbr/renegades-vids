@@ -88,6 +88,16 @@ class SegmentConfigSM:
     anchor_attach_s: float = 5.0
     min_play_s: float = 1.5
     max_play_s: float = 25.0
+    #: Fallback play length when no contraction minimum is found and no median
+    #: has been learned yet. Close to the 11.5s median of the labelled plays.
+    default_play_s: float = 11.0
+    #: Visual-only candidates must clear a higher bar than anchored ones: on
+    #: the calibration clip that path contributed zero unique recall while
+    #: producing roughly a third of all candidates. It is a rescue path for
+    #: wind-masked ends, not a primary detector.
+    visual_spike_ratio: float = 2.5
+    #: A visual-only episode within this of any anchor is a duplicate.
+    visual_dedupe_s: float = 8.0
 
 
 @dataclass
@@ -99,6 +109,9 @@ class Episode:
     peak: float
     baseline: float
     formation_s: float
+    #: False when the episode was force-closed at a clip boundary rather than
+    #: by the visual signal decaying.
+    closed: bool = True
 
     @property
     def had_formation(self) -> bool:
@@ -119,6 +132,9 @@ class Candidate:
     reasons: list[str] = field(default_factory=list)
     partial: bool = False
     accepted: bool = True
+    #: "high" when the start came from a clean contraction minimum, "low" when
+    #: it fell back to a learned duration. Review sorts low spans first.
+    span_conf: str = "high"
 
     @property
     def duration(self) -> float:
@@ -211,15 +227,23 @@ def find_episodes(
 
         states[index] = state
 
-    if state is State.LIVE and times[-1] - live_start >= cfg.min_play_s:
-        # Clip ended mid-play; keep it, the caller marks it partial.
+    if state is State.LIVE:
+        # Clip-boundary flush. Deliberately exempt from min_play_s: a play cut
+        # off by the recording can show any fraction of itself, and discarding
+        # it for being short is precisely the unrecoverable miss the brief
+        # warns about. A recording that stops mid-play still contains a
+        # real play, and its episode would otherwise never close and never be
+        # emitted -- which is exactly how the 520-531.5s play went missing
+        # despite having a clean 2.7x burst.
         episodes.append(
-            Episode(times[-1], times[-1], live_peak, formation_level, formation_frames / fps)
-        )
-        episodes[-1] = Episode(
-            live_start, times[-1], live_peak,
-            formation_level if np.isfinite(formation_level) else 0.0,
-            formation_frames / fps,
+            Episode(
+                start=live_start,
+                end=float(times[-1]),
+                peak=live_peak,
+                baseline=float(formation_level) if np.isfinite(formation_level) else 0.0,
+                formation_s=formation_frames / fps,
+                closed=False,
+            )
         )
     return episodes, states
 
@@ -236,6 +260,10 @@ class AnchorEvidence:
     snap: float | None
     #: Time of the dispersion peak.
     peak_time: float | None
+    #: "high" when the snap came from a clean contraction minimum, "low" when
+    #: it fell back to the learned median play duration. Review sorts uncertain
+    #: spans first rather than burying them among confident ones.
+    span_conf: str = "high"
 
     @property
     def spiked(self) -> bool:
@@ -250,6 +278,8 @@ def evidence_for_anchor(
     cfg: SegmentConfigSM,
     floor: float = 0.0,
     ambient: float | None = None,
+    fine: np.ndarray | None = None,
+    median_play_s: float | None = None,
 ) -> AnchorEvidence:
     """Score the backtrack window behind a whistle anchor.
 
@@ -273,6 +303,7 @@ def evidence_for_anchor(
     values, stamps = values[finite], stamps[finite]
     if len(values) < 6:
         return AnchorEvidence(0.0, 0.0, None, None)
+    detail = (fine if fine is not None else dispersion)[window][finite]
 
     peak_index = int(np.argmax(values))
     peak = float(values[peak_index])
@@ -287,19 +318,38 @@ def evidence_for_anchor(
     if ratio <= cfg.spike_ratio or peak < cfg.min_peak_over_ambient * ambient:
         return AnchorEvidence(0.0, ratio, None, float(stamps[peak_index]))
 
-    # The snap is where the trace leaves the settled level on its way to the
-    # peak; the formation is the settled run immediately before it. Both are
-    # referred to the same ceiling, which is the tighter of "well below this
-    # burst" and "tighter than this clip's ambient spread" -- the second test
-    # stops an empty, quiet field from reading as a formation.
+    # Snap localisation by contraction minimum, on the *fine* trace.
+    #
+    # Two timescales on purpose: episodes are detected on the heavily smoothed
+    # trace, where a burst is unambiguous, but the snap is localised on a
+    # lightly smoothed one. A rise-crossing measured through a 1.8s median
+    # filter drifts by seconds; a minimum is a point landmark, and blurring it
+    # first is what produced start errors from -16s to +7s.
+    #
+    # The landmark is physical: both teams set at the line of scrimmage, so the
+    # cluster reaches its tightest just before the ball moves. Crucially a
+    # formation does not shrink with play length, so this locates short plays
+    # whose burst never clears threshold -- the reason it beats widening
+    # buffers.
     ceiling = cfg.formation_max_ratio * min(peak, ambient)
-    limit = int(cfg.max_play_s * fps)
+    span_conf = "high"
 
-    snap_index = peak_index
-    steps = 0
-    while snap_index > 0 and values[snap_index - 1] > ceiling and steps < limit:
-        snap_index -= 1
-        steps += 1
+    search = detail[: peak_index + 1]
+    if len(search) >= 3:
+        # The *last* near-minimum, not the first. A settled formation is flat,
+        # so argmin would return the moment the players finished lining up
+        # rather than the moment they broke -- seconds too early. The landmark
+        # is the tightest instant immediately before the ball moves.
+        floor_value = float(np.min(search))
+        tolerance = 0.02 * max(peak - floor_value, 1e-6)
+        snap_index = int(np.flatnonzero(search <= floor_value + tolerance)[-1])
+        # A minimum sitting at the very peak means no contraction was visible.
+        if snap_index >= peak_index - 1:
+            snap_index, span_conf = _fallback_snap(
+                stamps, anchor, median_play_s, cfg
+            ), "low"
+    else:
+        snap_index, span_conf = _fallback_snap(stamps, anchor, median_play_s, cfg), "low"
 
     run = 0
     while snap_index - run - 1 >= 0 and values[snap_index - run - 1] <= ceiling:
@@ -310,4 +360,21 @@ def evidence_for_anchor(
         spike_ratio=ratio,
         snap=float(stamps[snap_index]),
         peak_time=float(stamps[peak_index]),
+        span_conf=span_conf,
     )
+
+
+def _fallback_snap(
+    stamps: np.ndarray,
+    anchor: float,
+    median_play_s: float | None,
+    cfg: SegmentConfigSM,
+) -> int:
+    """Index of ``anchor - median play duration``, clamped into the window.
+
+    Used when no clean contraction minimum exists. Marked ``span_conf="low"``
+    so review surfaces it rather than trusting it.
+    """
+    duration = median_play_s if median_play_s else cfg.default_play_s
+    target = anchor - duration
+    return int(np.clip(np.searchsorted(stamps, target), 0, len(stamps) - 1))

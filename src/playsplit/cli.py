@@ -155,5 +155,87 @@ def segment(
     console.print(f"[green]segments[/] {destination}")
 
 
+@app.command("cut")
+def cut(
+    game_dir: Path = typer.Argument(..., help="Game directory"),
+    from_labels: bool = typer.Option(
+        False, "--from-labels",
+        help="Cut the hand-corrected label spans instead of detected segments.",
+    ),
+    reencode: bool = typer.Option(False, "--reencode", help="Frame-exact boundaries"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Plan only, write nothing"),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing plays"),
+) -> None:
+    """Cut accepted plays into plays/ and write the manifest.
+
+    Automated segments are not wired in yet: span quality has not cleared its
+    checkpoint, and a clip that clips the snap cannot be fixed by a keystroke
+    in review. ``--from-labels`` needs no span estimation at all, so it ships
+    finished games today and exercises the whole ffmpeg path end to end.
+    """
+    from . import cut as cutter
+    from . import labels as labels_mod
+
+    if not from_labels:
+        console.print(
+            "[yellow]automated segments are gated pending span quality; "
+            "re-run with --from-labels[/]"
+        )
+        raise typer.Exit(1)
+
+    analysis_dir = game_dir / "analysis"
+    plays_dir = game_dir / "plays"
+    items: list[cutter.Cut] = []
+    number = 0
+
+    for path in probe.find_clips(game_dir):
+        info = probe.probe(path)
+        label_file = analysis_dir / f"{path.stem}__labels_corrected.csv"
+        rows, warnings = labels_mod.read(label_file, clip_duration=info.duration)
+        for warning in warnings:
+            console.print(f"[yellow]{path.name}: {warning}")
+        for row in rows:
+            if not row.is_kept:
+                continue
+            number += 1
+            items.append(
+                cutter.Cut(
+                    play=number, clip=info, start=row.start, end=row.end,
+                    partial=row.partial, notes=row.notes,
+                )
+            )
+
+    if not items:
+        console.print(f"[red]no kept labels found under {analysis_dir}")
+        raise typer.Exit(1)
+
+    table = Table("play", "clip", "start", "end", "dur", "partial")
+    starts: dict[int, float] = {}
+    for item in items:
+        destination = plays_dir / item.filename
+        if destination.exists() and not force and not dry_run:
+            console.print(f"[dim]exists, skipping {destination.name} (use --force)")
+            starts[item.play] = item.start
+            continue
+        _, actual = cutter.cut_one(
+            item, destination, reencode=reencode, dry_run=dry_run
+        )
+        starts[item.play] = actual
+        table.add_row(
+            str(item.play), item.clip.name, f"{actual:.2f}", f"{item.end:.2f}",
+            f"{item.end - actual:.1f}s", "yes" if item.partial else "",
+        )
+
+    console.print(table)
+    if dry_run:
+        console.print(f"[yellow]dry run: {len(items)} plays planned, nothing written")
+        return
+
+    manifest = plays_dir / "manifest.csv"
+    cutter.write_manifest(manifest, items, starts)
+    console.print(f"[green]{len(items)} plays[/] → {plays_dir}")
+    console.print(f"[green]manifest[/] {manifest}")
+
+
 if __name__ == "__main__":
     app()

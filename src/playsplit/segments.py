@@ -36,6 +36,7 @@ def build(
     fps: float,
     cfg: SegmentConfigSM,
     *,
+    fine: np.ndarray | None = None,
     pre_buffer_s: float,
     post_buffer_s: float,
     clip_duration: float,
@@ -52,6 +53,10 @@ def build(
     candidates: list[Candidate] = []
     used_episodes: set[int] = set()
     previous_end = 0.0
+    #: Median span of anchored candidates so far, used as the fallback play
+    #: length once a few plays have been seen on this clip.
+    learned: list[float] = []
+    learned_median: float | None = None
 
     def ignored(time: float) -> bool:
         return any(low <= time <= high for low, high in ignore_ranges)
@@ -64,7 +69,8 @@ def build(
             continue
 
         evidence = evidence_for_anchor(
-            times, dispersion, whistle.time, fps, cfg, floor=previous_end
+            times, dispersion, whistle.time, fps, cfg,
+            floor=previous_end, fine=fine, median_play_s=learned_median,
         )
         match = _nearest_episode(episodes, whistle.time, cfg.anchor_attach_s, used_episodes)
         if match is not None:
@@ -98,6 +104,9 @@ def build(
         )
         start = max(start, previous_end)
         previous_end = whistle.time
+        if evidence.span_conf == "high":
+            learned.append(whistle.time - start)
+            learned_median = float(np.median(learned))
         candidates.append(
             Candidate(
                 index=0,
@@ -108,32 +117,49 @@ def build(
                 anchor_id=anchor_id,
                 anchor_time=whistle.time,
                 reasons=reasons,
+                span_conf=evidence.span_conf,
             )
         )
 
-    # Visual-only episodes: the wind-masked recovery path. It contributes
-    # nothing on the calibration clip (whistle recall is 1.00 there), but the
-    # code path has to exist for clips where the microphone loses one.
+    # Visual-only episodes: the wind-masked recovery path. Deliberately narrow.
+    # On the calibration clip this path produced roughly a third of all
+    # candidates and contributed zero unique recall, so it now needs a higher
+    # burst, must not duplicate an anchor, and must either have closed cleanly
+    # or been flushed at a clip boundary.
+    anchor_times = [w.time for w in whistles]
     for position, episode in enumerate(episodes):
         if position in used_episodes:
             continue
-        evidence = evidence_for_anchor(times, dispersion, episode.end, fps, cfg)
-        if not evidence.spiked:
+        if any(abs(episode.end - a) <= cfg.visual_dedupe_s for a in anchor_times):
             continue
-        formation_s = evidence.formation_s
+        evidence = evidence_for_anchor(
+            times, dispersion, episode.end, fps, cfg, fine=fine,
+            median_play_s=learned_median,
+        )
+        boundary = not episode.closed
+        if not boundary and (
+            not evidence.spiked or evidence.spike_ratio < cfg.visual_spike_ratio
+        ):
+            continue
+        reason = (
+            "episode still live at the clip boundary; force-closed and kept "
+            "as a partial play"
+            if boundary
+            else f"visual burst {evidence.spike_ratio:.1f}x with no whistle; "
+            "possible wind-masked play end"
+        )
+        start = evidence.snap if evidence.snap is not None else episode.start
         candidates.append(
             Candidate(
                 index=0,
-                start=max(0.0, episode.start - pre_buffer_s),
-                end=min(episode.end + post_buffer_s, clip_duration),
+                start=max(0.0, start - pre_buffer_s),
+                end=min(episode.end + (0.0 if boundary else post_buffer_s), clip_duration),
                 tier=Tier.LOW,
                 confidence=CONFIDENCE[Tier.LOW],
                 anchor_id=None,
                 anchor_time=None,
-                reasons=[
-                    f"visual burst with no whistle (formation {formation_s:.1f}s); "
-                    "possible wind-masked play end"
-                ],
+                reasons=[reason],
+                span_conf=evidence.span_conf,
             )
         )
 
@@ -242,6 +268,7 @@ def read(path: Path) -> list[Candidate]:
             tier=Tier(row["tier"]), confidence=row["confidence"],
             anchor_id=row["anchor_id"], anchor_time=row["anchor_time"],
             reasons=row["reasons"], partial=row["partial"], accepted=row["accepted"],
+            span_conf=row.get("span_conf", "high"),
         )
         for row in payload["segments"]
     ]
