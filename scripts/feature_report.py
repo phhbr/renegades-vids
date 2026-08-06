@@ -26,7 +26,7 @@ OUT = Path("analysis/features.png")
 
 CLIPS = [
     (ROOT / "RenegadesVsAnts", "GH010007.MP4", "GH010007__labels_corrected.csv",
-     "RenegadesVsAnts / GH010007 — labelled (12 keeps)"),
+     "RenegadesVsAnts / GH010007 — labelled (13 keeps)"),
     (ROOT / "SpatzenVsAnts", "GH020002.MP4", "GH020002__labels.csv",
      "SpatzenVsAnts / GH020002 — negative control (0 plays expected)"),
 ]
@@ -163,9 +163,9 @@ table_ax.text(
     "  • end-match window is asymmetric: whistle ∈ [end − 4 s, end + 0.5 s]\n"
     "  • the partial final play (520–531.5 s) is excluded from the recall denominator\n"
     "  • “mid-play” means whistle ∈ [start + 2 s, end − 4 s]\n\n"
-    "Results\n"
-    "  recall     11 / 11  = 1.00     (was 0.83 under a symmetric ±2.5 s window)\n"
-    "  precision  12 / 30  = 0.40     (matches the parallel-game prediction)\n"
+    "Results (13 keeps, CHECK rows resolved)\n"
+    "  recall     12 / 12  = 1.00     (was 0.83 under a symmetric ±2.5 s window)\n"
+    "  precision  13 / 30  = 0.43     (matches the parallel-game prediction)\n"
     "  mid-play whistles          0   (was “6 of 12” — entirely a window artifact)\n\n"
     "Implication for P3\n"
     "  Whistles are a far better end anchor than last checkpoint suggested, but\n"
