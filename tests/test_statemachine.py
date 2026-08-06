@@ -186,3 +186,34 @@ def test_clip_boundary_marks_partial(start: float, expect_partial: bool) -> None
 
     live = [c for c in candidates if c.tier is not Tier.SUPPRESSED]
     assert live and live[0].partial is expect_partial
+
+
+def test_consecutive_plays_never_overlap() -> None:
+    """The pre-buffer must not reach back over the previous play's end.
+
+    Regression: the clamp to the previous end was applied before the buffer was
+    subtracted, so every candidate started `pre_buffer` seconds inside its
+    predecessor. Two kept clips then contained the same footage, and review
+    could not catch it because both looked correct on their own.
+    """
+    times, values = trace(duration_s=140.0)
+    add_play(times, values, snap=30.0, duration=6.0, peak=300.0)
+    add_play(times, values, snap=44.0, duration=6.0, peak=300.0)
+    whistles = [Whistle(t, t + 0.3, 1.0) for t in (37.0, 51.0)]
+
+    cfg = SegmentConfigSM()
+    episodes, _ = find_episodes(times, values, FPS, cfg)
+    candidates = [
+        c
+        for c in build(
+            episodes, whistles, times, values, FPS, cfg,
+            pre_buffer_s=8.0, post_buffer_s=0.7, clip_duration=times[-1],
+        )
+        if c.tier is not Tier.SUPPRESSED
+    ]
+
+    ordered = sorted(candidates, key=lambda c: c.start)
+    for earlier, later in zip(ordered, ordered[1:]):
+        assert later.start >= earlier.end - 1e-6, (
+            f"{later.start:.2f} starts inside {earlier.start:.2f}-{earlier.end:.2f}"
+        )

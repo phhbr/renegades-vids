@@ -126,16 +126,21 @@ def build(
                 "guaranteed lookback"
             )
             start = guaranteed
-        start = max(start, previous_end)
-        previous_end = whistle.time
+        # Clamp AFTER the pre-buffer, not before. Subtracting the buffer from a
+        # clamped start simply undid the clamp and let each candidate reach back
+        # over its predecessor's end -- two kept clips then contain the same
+        # footage, which review cannot fix because both look correct.
+        emitted_start = max(start - pre_buffer_s, previous_end, 0.0)
+        emitted_end = min(whistle.time + post_buffer_s, clip_duration)
         if evidence.span_conf == "high":
             learned.append(whistle.time - start)
             learned_median = float(np.median(learned))
+        previous_end = emitted_end
         candidates.append(
             Candidate(
                 index=0,
-                start=max(0.0, start - pre_buffer_s),
-                end=min(whistle.time + post_buffer_s, clip_duration),
+                start=emitted_start,
+                end=emitted_end,
                 tier=tier,
                 confidence=CONFIDENCE[tier],
                 anchor_id=anchor_id,
@@ -176,7 +181,7 @@ def build(
         candidates.append(
             Candidate(
                 index=0,
-                start=max(0.0, start - pre_buffer_s),
+                start=max(start - pre_buffer_s, 0.0),
                 end=min(episode.end + (0.0 if boundary else post_buffer_s), clip_duration),
                 tier=Tier.LOW,
                 confidence=CONFIDENCE[Tier.LOW],
