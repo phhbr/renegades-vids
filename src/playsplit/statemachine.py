@@ -340,9 +340,17 @@ def evidence_for_anchor(
         # so argmin would return the moment the players finished lining up
         # rather than the moment they broke -- seconds too early. The landmark
         # is the tightest instant immediately before the ball moves.
-        floor_value = float(np.min(search))
-        tolerance = 0.02 * max(peak - floor_value, 1e-6)
-        snap_index = int(np.flatnonzero(search <= floor_value + tolerance)[-1])
+        # nanmin, and a guarded selection: on a near-empty field the cluster
+        # vanishes for whole stretches, dispersion is NaN there, and plain min
+        # propagates the NaN so every comparison is False. That crashed the
+        # sweep on a 110s chapter with a median cluster size of 2.
+        floor_value = float(np.nanmin(search)) if np.isfinite(search).any() else np.nan
+        candidates_idx = (
+            np.flatnonzero(search <= floor_value + 0.02 * max(peak - floor_value, 1e-6))
+            if np.isfinite(floor_value)
+            else np.array([], dtype=int)
+        )
+        snap_index = int(candidates_idx[-1]) if candidates_idx.size else peak_index
         # A minimum sitting at the very peak means no contraction was visible.
         if snap_index >= peak_index - 1:
             snap_index, span_conf = _fallback_snap(

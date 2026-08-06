@@ -55,28 +55,48 @@ def estimate_band(
     *,
     threshold: int = 12,
     activity_fraction: float = 0.45,
+    duration: float | None = None,
 ) -> tuple[Band, np.ndarray]:
     """Locate the play band from accumulated motion.
 
-    Returns the band and the full accumulated-activity image, which the review
-    page renders as a mask overlay so the estimate is inspectable rather than
+    Returns the band and the accumulated-activity image, which the review page
+    renders as a mask overlay so the estimate is inspectable rather than
     implicit.
+
+    Sampled rather than exhaustive. The band is a property of where the camera
+    is pointing, which does not change within a clip, so a few windows spread
+    across the recording settle it as well as every frame does. Decoding the
+    whole clip here was costing as much as the detection pass itself -- the
+    ``fps`` filter throws frames away *after* they are decoded, so a low
+    analysis frame rate saves nothing on its own.
     """
     width, height = cfg.proxy_width, cfg.proxy_height
     accumulator = np.zeros((height, width), dtype=np.float32)
-    previous: np.ndarray | None = None
 
-    for frame in iter_frames(
-        path,
-        cfg.fps,
-        crop=Crop(0, 0, source_width, source_height),
-        scale=(width, height),
-        gray=True,
-    ):
-        if previous is not None:
-            delta = np.abs(frame.astype(np.int16) - previous.astype(np.int16))
-            accumulator += delta > threshold
-        previous = frame
+    if duration and duration > cfg.band_sample_windows * cfg.band_window_s * 1.5:
+        step = duration / (cfg.band_sample_windows + 1)
+        windows = [
+            (index * step, cfg.band_window_s)
+            for index in range(1, cfg.band_sample_windows + 1)
+        ]
+    else:
+        windows = [(None, None)]
+
+    for start, span in windows:
+        previous: np.ndarray | None = None
+        for frame in iter_frames(
+            path,
+            cfg.fps,
+            crop=Crop(0, 0, source_width, source_height),
+            scale=(width, height),
+            gray=True,
+            start=start,
+            duration=span,
+        ):
+            if previous is not None:
+                delta = np.abs(frame.astype(np.int16) - previous.astype(np.int16))
+                accumulator += delta > threshold
+            previous = frame
 
     row_profile = accumulator.sum(axis=1)
     if row_profile.max() <= 0:

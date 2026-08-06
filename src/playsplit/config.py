@@ -103,6 +103,11 @@ class AnalysisConfig:
     #: Frames at the head of a clip excluded from robust-scaling statistics --
     #: camera handling at clip start otherwise compresses the whole trace.
     warmup_skip_s: float = 25.0
+    #: Windows sampled across a clip to locate the play band, and their length.
+    #: The band is a static property of the camera, so 8 x 8s settles it as
+    #: well as a full decode at a fraction of the cost.
+    band_sample_windows: int = 8
+    band_window_s: float = 8.0
 
 
 @dataclass

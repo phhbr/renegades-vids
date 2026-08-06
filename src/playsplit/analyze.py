@@ -28,7 +28,7 @@ def _band(clip: ClipInfo, analysis_dir: Path, cfg: Config, force: bool, log) -> 
             data["column_profile"],
         )
     band, accumulator = estimate_band(
-        clip.path, clip.width, clip.height, cfg.analysis
+        clip.path, clip.width, clip.height, cfg.analysis, duration=clip.duration
     )
     np.savez_compressed(
         cache, top=band.top, bottom=band.bottom, peak=band.peak,
