@@ -54,7 +54,7 @@ def test_quiet_trace_yields_no_episodes() -> None:
     assert episodes == []
 
 
-def test_formation_then_burst_is_high_tier() -> None:
+def test_formation_then_burst_is_anchored_and_confident() -> None:
     times, values = trace()
     add_play(times, values, snap=40.0, duration=8.0, peak=300.0)
     whistles = [Whistle(48.5, 48.8, 1.0)]
@@ -66,7 +66,10 @@ def test_formation_then_burst_is_high_tier() -> None:
         pre_buffer_s=3.0, post_buffer_s=0.7, clip_duration=times[-1],
     )
 
-    assert [c.tier for c in candidates] == [Tier.HIGH]
+    # HIGH is retired: the formation rule scored zero true positives on real
+    # footage. A formation-plus-burst play is a confident MEDIUM instead.
+    assert [c.tier for c in candidates] == [Tier.MEDIUM]
+    assert candidates[0].confidence >= 0.6
 
 
 def test_formation_alone_never_emits_a_play() -> None:
@@ -84,6 +87,7 @@ def test_formation_alone_never_emits_a_play() -> None:
     )
 
     assert all(c.tier is not Tier.HIGH for c in candidates)
+    assert Tier.MEDIUM not in [c.tier for c in candidates]
 
 
 def test_burst_without_formation_is_medium() -> None:

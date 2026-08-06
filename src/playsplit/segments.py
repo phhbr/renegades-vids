@@ -23,9 +23,26 @@ from .statemachine import (
     evidence_for_anchor,
 )
 
-#: Confidence is presentational -- it orders the review queue. It is not a
-#: probability and must never gate a decision; the tier does that.
+#: Base confidence per tier. Presentational only -- it orders the review queue
+#: and must never gate a decision.
 CONFIDENCE = {Tier.HIGH: 0.9, Tier.MEDIUM: 0.6, Tier.LOW: 0.3, Tier.SUPPRESSED: 0.0}
+
+#: Tier.HIGH is no longer assigned. The formation-plus-burst rule that produced
+#: it scored zero true positives on the labelled clip while still firing on the
+#: negative control -- a sort key anti-correlated with truth is worse than
+#: none. Ranking is by duration plausibility instead, the only key measured to
+#: separate real plays from false candidates (AUC 0.75). The enum member stays
+#: so existing segments.json files still parse.
+PLAUSIBLE_DURATION_S = (3.0, 24.0)
+
+
+def duration_confidence(duration: float) -> float:
+    """How play-like a candidate's length is, in [0, 1]."""
+    low, high = PLAUSIBLE_DURATION_S
+    if low <= duration <= high:
+        return 1.0
+    reference = low if duration < low else high
+    return max(0.0, 1.0 - abs(duration - reference) / reference)
 
 
 def build(
@@ -76,18 +93,11 @@ def build(
         if match is not None:
             used_episodes.add(match[0])
 
-        if evidence.spiked and evidence.formation_s >= cfg.formation_min_s:
-            tier = Tier.HIGH
-            reasons = [
-                f"formation held {evidence.formation_s:.1f}s, then burst "
-                f"{evidence.spike_ratio:.1f}x",
-                f"whistle @ {whistle.time:.2f}s corroborates the end",
-            ]
-        elif evidence.spiked:
+        if evidence.spiked:
             tier = Tier.MEDIUM
             reasons = [
-                f"burst {evidence.spike_ratio:.1f}x without a sustained formation "
-                f"({evidence.formation_s:.1f}s)",
+                f"burst {evidence.spike_ratio:.1f}x, formation "
+                f"{evidence.formation_s:.1f}s",
                 f"whistle @ {whistle.time:.2f}s corroborates the end",
             ]
         else:
@@ -102,6 +112,20 @@ def build(
             if evidence.snap is not None
             else _quiet_before(times, dispersion, whistle.time, fps, cfg)
         )
+        # Guaranteed lookback. A late start omits the snap and destroys the
+        # play; an early start only prepends walk-up footage. So the estimate
+        # is never trusted to run later than a long play would: whichever of
+        # the two is earlier wins. This bounds lateness structurally rather
+        # than relying on the estimator, which the dispersion trace cannot
+        # support -- it has several minima per play and the deepest is not
+        # reliably the snap.
+        guaranteed = whistle.time - cfg.guaranteed_lookback_s
+        if guaranteed < start:
+            reasons.append(
+                f"start pulled back to the {cfg.guaranteed_lookback_s:.0f}s "
+                "guaranteed lookback"
+            )
+            start = guaranteed
         start = max(start, previous_end)
         previous_end = whistle.time
         if evidence.span_conf == "high":
@@ -239,6 +263,15 @@ def _finalise(
             )
         output.append(candidate)
 
+    for candidate in output:
+        if candidate.tier is not Tier.SUPPRESSED:
+            # Blend the structural tier with duration plausibility so review is
+            # ordered by the only signal measured to rank true plays highly.
+            candidate.confidence = round(
+                0.5 * CONFIDENCE[candidate.tier]
+                + 0.5 * duration_confidence(candidate.duration),
+                3,
+            )
     for number, candidate in enumerate(
         [c for c in output if c.tier is not Tier.SUPPRESSED], start=1
     ):

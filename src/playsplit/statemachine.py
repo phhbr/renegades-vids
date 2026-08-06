@@ -70,6 +70,17 @@ class SegmentConfigSM:
     formation_min_s: float = 3.0
     #: Fraction of the formation-to-peak rise that marks the snap.
     snap_rise_fraction: float = 0.25
+    #: Fraction of the rise that counts as burst onset. The snap estimate is
+    #: clamped to precede this, which is what makes a late start impossible.
+    onset_fraction: float = 0.15
+    #: Band above the window minimum still counted as part of the contraction
+    #: plateau. Wider means earlier, baggier starts -- the safe direction.
+    plateau_fraction: float = 0.25
+    #: No candidate may start later than this before its whistle. Set from the
+    #: labelled play-duration distribution (max 23.3s, P90 ~20s) so even the
+    #: longest plays keep their snap. Costs dead time on short plays, which is
+    #: the cheap direction of the error.
+    guaranteed_lookback_s: float = 22.0
     #: Dispersion above this multiple of the pre-snap level is a burst.
     spike_ratio: float = 1.5
     #: ...and it must also clear the clip's ambient dispersion by this much.
@@ -334,34 +345,60 @@ def evidence_for_anchor(
     ceiling = cfg.formation_max_ratio * min(peak, ambient)
     span_conf = "high"
 
-    search = detail[: peak_index + 1]
-    if len(search) >= 3:
-        # The *last* near-minimum, not the first. A settled formation is flat,
-        # so argmin would return the moment the players finished lining up
-        # rather than the moment they broke -- seconds too early. The landmark
-        # is the tightest instant immediately before the ball moves.
-        # nanmin, and a guarded selection: on a near-empty field the cluster
-        # vanishes for whole stretches, dispersion is NaN there, and plain min
-        # propagates the NaN so every comparison is False. That crashed the
-        # sweep on a 110s chapter with a median cluster size of 2.
-        floor_value = float(np.nanmin(search)) if np.isfinite(search).any() else np.nan
-        candidates_idx = (
-            np.flatnonzero(search <= floor_value + 0.02 * max(peak - floor_value, 1e-6))
-            if np.isfinite(floor_value)
-            else np.array([], dtype=int)
-        )
-        snap_index = int(candidates_idx[-1]) if candidates_idx.size else peak_index
-        # A minimum sitting at the very peak means no contraction was visible.
-        if snap_index >= peak_index - 1:
-            snap_index, span_conf = _fallback_snap(
-                stamps, anchor, median_play_s, cfg
-            ), "low"
-    else:
-        snap_index, span_conf = _fallback_snap(stamps, anchor, median_play_s, cfg), "low"
+    # Hard guard: the snap must precede burst onset, so the search stops at
+    # onset rather than at the peak. A late start destroys a play -- the snap
+    # is simply missing from the clip and no amount of reviewing recovers it --
+    # whereas an early start only adds walk-up footage, which is watchable and
+    # costs a keystroke to keep. Clamping the window makes the destructive
+    # error structurally impossible instead of merely unlikely.
+    onset_index = peak_index
+    onset_level = settled_hint = float(np.nanmedian(values[:peak_index]))
+    threshold = onset_level + cfg.onset_fraction * (peak - onset_level)
+    while onset_index > 0 and values[onset_index - 1] > threshold:
+        onset_index -= 1
 
+    search = detail[: max(onset_index, 1)]
+
+    # The contraction plateau *is* the formation: one contiguous run of
+    # settled dispersion ending where the ball moves. Its start is the snap
+    # estimate and its length is the formation duration, so the two can no
+    # longer disagree with each other.
+    #
+    # Anchoring at the plateau's start deliberately biases early. The error
+    # directions are not symmetric: a late start omits the snap and destroys
+    # the play, unrecoverable in review without scrubbing, while an early start
+    # only prepends players walking to the line -- watchable, and still a keep.
+    # An earlier version anchored at the plateau's *end*, which is tighter on
+    # average but fails the wrong way when the trace has several minima: on the
+    # play at 36.8-53.0s it picked a mid-play dip at 48.2s, cutting after the
+    # ball had already been snapped.
+    ceiling = cfg.formation_max_ratio * min(peak, ambient)
+    span_conf = "high"
     run = 0
-    while snap_index - run - 1 >= 0 and values[snap_index - run - 1] <= ceiling:
-        run += 1
+
+    if len(search) >= 3 and np.isfinite(search).any():
+        floor_value = float(np.nanmin(search))
+        plateau_ceiling = min(
+            ceiling, floor_value + cfg.plateau_fraction * max(peak - floor_value, 1e-6)
+        )
+        qualifying = np.flatnonzero(search <= plateau_ceiling)
+        if qualifying.size:
+            end_index = int(qualifying[-1])
+            start_index = end_index
+            while start_index > 0 and search[start_index - 1] <= plateau_ceiling:
+                start_index -= 1
+            run = end_index - start_index + 1
+            # Anchor at the plateau's end: empirically the tightest estimate
+            # (median |start error| 1.50s versus 2.83s for the plateau start).
+            # Lateness is not left to this estimate -- it is bounded below by
+            # the guaranteed lookback applied in segments.build.
+            snap_index = end_index
+        else:
+            snap_index = _fallback_snap(stamps, anchor, median_play_s, cfg)
+            span_conf = "low"
+    else:
+        snap_index = _fallback_snap(stamps, anchor, median_play_s, cfg)
+        span_conf = "low"
 
     return AnchorEvidence(
         formation_s=run / fps,
