@@ -38,3 +38,10 @@ packages = ["src/playsplit"]
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+# Pinned so `pytest` collects the suite no matter which directory it is run
+# from. Without it, running from a subdirectory silently collects zero tests
+# and reports success -- which nearly let a commit through on a green-looking
+# run that had executed nothing.
+testpaths = ["tests"]
