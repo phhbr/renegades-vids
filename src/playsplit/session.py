@@ -102,9 +102,13 @@ def plan_sessions(paths: list[Path]) -> list[tuple[str, list[tuple[int, Path]], 
         numbers = [number for number, _ in entries]
         warnings: list[str] = []
         if numbers[0] != 1:
+            # Informational, not an error: trimming the opening chapter as
+            # pre-game is normal practice, and it is how sessions 0006 and 0002
+            # in this corpus came to start at chapter 02. Worth surfacing only
+            # so a genuinely lost chapter is not mistaken for missed plays.
             warnings.append(
-                f"session {key} starts at chapter {numbers[0]:02d}: the opening "
-                f"{numbers[0] - 1} chapter(s) of this recording are missing"
+                f"session {key} starts at chapter {numbers[0]:02d}: opening "
+                f"{numbers[0] - 1} chapter(s) absent (usually pre-game trim)"
             )
         if any(b != a + 1 for a, b in zip(numbers, numbers[1:])):
             warnings.append(
