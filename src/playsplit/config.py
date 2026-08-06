@@ -77,8 +77,11 @@ class DetectConfig:
 class SegmentConfig:
     """State machine and cutting."""
 
+    #: Fitted to the user's labelling style, not the brief's defaults (5.0/3.0):
+    #: measured ends land a median 0.69s after the whistle, and starts a median
+    #: ~5s before the detected snap.
     pre_buffer_s: float = 5.0
-    post_buffer_s: float = 3.0
+    post_buffer_s: float = 0.7
     min_play_s: float = 2.0
     max_play_s: float = 25.0
     #: How far back from a whistle anchor to search for the snap.

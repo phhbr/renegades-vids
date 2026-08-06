@@ -89,5 +89,71 @@ def features(
     )
 
 
+@app.command("segment")
+def segment(
+    game_dir: Path = typer.Argument(..., help="Game directory"),
+    clip: str = typer.Option(..., "--clip", help="Clip filename"),
+    force: bool = typer.Option(False, "--force", help="Recompute cached artifacts"),
+) -> None:
+    """Emit tiered candidate segments for one clip."""
+    import numpy as np
+
+    from . import analyze, audio, segments
+    from .statemachine import SegmentConfigSM, Tier, find_episodes
+
+    cfg = config_mod.load(game_dir)
+    matches = [p for p in probe.find_clips(game_dir) if p.name == clip]
+    if not matches:
+        console.print(f"[red]clip {clip!r} not found in {game_dir}")
+        raise typer.Exit(1)
+
+    info = probe.probe(matches[0])
+    analysis_dir = game_dir / "analysis"
+    rows, realtime = analyze.features(
+        info, analysis_dir, cfg, force=force,
+        log=lambda message: console.print(f"[dim]{message}"),
+    )
+    times = np.array([r.time for r in rows])
+    dispersion = np.array([r.dispersion for r in rows])
+    width = 9
+    padded = np.pad(dispersion, (width // 2, width // 2), mode="edge")
+    smoothed = np.nanmedian(
+        np.lib.stride_tricks.sliding_window_view(padded, width), axis=1
+    )
+
+    signal = audio.load_audio(
+        info.path, cfg.audio.sample_rate, analysis_dir / f"{info.path.stem}.wav"
+    )
+    whistles = audio.detect(signal, cfg.audio)
+
+    sm = SegmentConfigSM()
+    episodes, _ = find_episodes(times, smoothed, cfg.analysis.fps, sm)
+    candidates = segments.build(
+        episodes, whistles, times, smoothed, cfg.analysis.fps, sm,
+        pre_buffer_s=cfg.segment.pre_buffer_s,
+        post_buffer_s=cfg.segment.post_buffer_s,
+        clip_duration=info.duration,
+        ignore_ranges=cfg.ignore_ranges.get(clip, []),
+    )
+
+    destination = analysis_dir / f"{info.path.stem}__segments.json"
+    segments.write(
+        destination, candidates, clip=clip,
+        meta={
+            "anchors": len(whistles),
+            "episodes": len(episodes),
+            "realtime_factor": realtime,
+            "pre_buffer_s": cfg.segment.pre_buffer_s,
+            "post_buffer_s": cfg.segment.post_buffer_s,
+        },
+    )
+
+    table = Table("tier", "count")
+    for tier in Tier:
+        table.add_row(tier.value, str(sum(1 for c in candidates if c.tier is tier)))
+    console.print(table)
+    console.print(f"[green]segments[/] {destination}")
+
+
 if __name__ == "__main__":
     app()
