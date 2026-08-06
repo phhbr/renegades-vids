@@ -1,1 +1,8 @@
 assets
+.venv/
+__pycache__/
+*.pyc
+analysis/
+plays/
+*.npy
+yolo11n.pt
