@@ -62,5 +62,32 @@ def bootstrap(
     console.print(f"[green]review[/] {page}")
 
 
+@app.command("features")
+def features(
+    game_dir: Path = typer.Argument(..., help="Game directory"),
+    clip: str = typer.Option(..., "--clip", help="Clip filename"),
+    force: bool = typer.Option(False, "--force", help="Recompute cached artifacts"),
+) -> None:
+    """Compute detection-cluster features for one clip."""
+    from . import analyze
+
+    cfg = config_mod.load(game_dir)
+    matches = [p for p in probe.find_clips(game_dir) if p.name == clip]
+    if not matches:
+        console.print(f"[red]clip {clip!r} not found in {game_dir}")
+        raise typer.Exit(1)
+
+    info = probe.probe(matches[0])
+    rows, realtime = analyze.features(
+        info, game_dir / "analysis", cfg, force=force,
+        log=lambda message: console.print(f"[dim]{message}"),
+    )
+    valid = [f for f in rows if f.valid]
+    console.print(
+        f"[green]{len(rows)}[/] frames, {len(valid)} with a cluster, "
+        f"{realtime:.1f}x realtime"
+    )
+
+
 if __name__ == "__main__":
     app()

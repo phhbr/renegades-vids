@@ -82,6 +82,11 @@ def run(
         clip_duration=clip.duration,
     )
     label_file = analysis_dir / f"{stem}__labels.csv"
+    # Ground truth lives under a different name on purpose: re-running bootstrap
+    # must never be able to destroy a hand-corrected pass.
+    corrected = analysis_dir / f"{stem}__labels_corrected.csv"
+    if corrected.is_file():
+        log(f"      note: corrected labels already exist at {corrected.name}")
     labels.write(label_file, rows)
 
     log(f"[4/4] extracting {len(rows) * 3} thumbnails")
