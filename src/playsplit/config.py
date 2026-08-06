@@ -60,6 +60,17 @@ class DetectConfig:
     conf: float = 0.20
     #: Vertical padding added around the auto-detected activity band.
     band_padding_px: int = 40
+    #: Ultralytics tracker config. ByteTrack ships with the package, so this
+    #: resolves offline.
+    tracker: str = "bytetrack.yaml"
+    #: Tracking is off by default. Measured on GH010007 it changed nothing that
+    #: mattered -- per-track stationarity scored 5/12 legible plays against the
+    #: positional occupancy map's 6/12 -- while the tracker's association step
+    #: discarded 22% of detections (80663 -> 62576), which cost dispersion
+    #: contrast. Kept behind a flag because it is the right tool if detections
+    #: ever get dense enough for tracks to survive; at 5 fps in a crowd of ~30
+    #: near-identical 45px people they do not (median track life 5.4s).
+    use_tracker: bool = False
 
 
 @dataclass

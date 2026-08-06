@@ -37,6 +37,16 @@ class ClusterConfig:
     #: Weight on continuity with the previous frame's cluster, in pixels of
     #: centroid distance traded against one extra member.
     continuity_px_per_member: float = 45.0
+    #: Sliding horizon over which a track's displacement is judged. Long
+    #: enough that linemen holding a formation are not mistaken for furniture
+    #: -- a 10 s horizon would suppress exactly the people formation detection
+    #: depends on -- and short enough that benches still die.
+    stationary_horizon_s: float = 36.0
+    #: Displacement below which a track is furniture, in player-heights. A
+    #: player is ~1.75 m, so 1.15 heights is about 2 m. Expressing the
+    #: threshold in heights rather than pixels makes it perspective-correct:
+    #: the same real distance is fewer pixels at the far side of the pitch.
+    stationary_move_heights: float = 1.15
     #: Grid cell size for the occupancy map, in source pixels.
     occupancy_cell_px: int = 48
     #: A cell occupied in more than this fraction of frames holds furniture,
@@ -80,6 +90,55 @@ def gate(
         return xs, ys, 0
     keep = mask.contains_many(xs, ys)
     return xs[keep], ys[keep], int((~keep).sum())
+
+
+def stationary_detections(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    heights: np.ndarray,
+    track_id: np.ndarray,
+    frame_index: np.ndarray,
+    fps: float,
+    cfg: ClusterConfig,
+) -> np.ndarray:
+    """Flag detections belonging to a track that is not going anywhere.
+
+    Judged per detection over a sliding horizon rather than per track over its
+    whole life, so a substitute who warms up, sits down, then comes on is
+    suppressed only while actually parked.
+
+    Sprinters fragment into short-lived tracks at 5 fps. That is by design:
+    a fragment spans less than the horizon, so it is never judged stationary
+    and stays in the active set. Continuity is only ever needed for people
+    standing still, who track trivially at any frame rate.
+    """
+    flags = np.zeros(len(xs), dtype=bool)
+    if len(xs) == 0:
+        return flags
+
+    horizon_frames = cfg.stationary_horizon_s * fps
+    for identity in np.unique(track_id):
+        if identity < 0:
+            continue
+        member = np.flatnonzero(track_id == identity)
+        frames = frame_index[member].astype(float)
+        order = np.argsort(frames)
+        member, frames = member[order], frames[order]
+        px, py = xs[member], ys[member]
+        scale = np.median(heights[member]) or 1.0
+        limit = cfg.stationary_move_heights * scale
+
+        # Widest displacement within the horizon centred on each detection.
+        starts = np.searchsorted(frames, frames - horizon_frames / 2, side="left")
+        ends = np.searchsorted(frames, frames + horizon_frames / 2, side="right")
+        for position in range(len(member)):
+            lo, hi = starts[position], ends[position]
+            if frames[hi - 1] - frames[lo] < horizon_frames * 0.6:
+                continue  # too short a window to call it parked
+            spread = max(np.ptp(px[lo:hi]), np.ptp(py[lo:hi]))
+            if spread < limit:
+                flags[member[position]] = True
+    return flags
 
 
 def occupancy_map(
@@ -156,6 +215,28 @@ def dominant_cluster(
         return value
 
     return max(candidates, key=score)
+
+
+def features_from_active(time: float, xs: np.ndarray, rejected: int) -> FrameFeatures:
+    """Summarise the active participant set directly.
+
+    With foot-point gating and per-track stationarity applied, what remains
+    inside the field mask *is* the participant set, so its statistics can be
+    taken as-is. This deliberately replaces picking a "dominant" sub-cluster:
+    gap-based splitting fragments the players at exactly the wrong moment,
+    when receivers spread at the snap, and keeping one fragment holds
+    dispersion flat through the burst it is supposed to measure.
+    """
+    if len(xs) == 0:
+        return FrameFeatures(time, 0, float("nan"), float("nan"), float("nan"), rejected)
+    return FrameFeatures(
+        time=time,
+        count=len(xs),
+        centroid_x=float(xs.mean()),
+        centroid_y=float("nan"),
+        dispersion=float(xs.std()) if len(xs) > 1 else 0.0,
+        rejected=rejected,
+    )
 
 
 def features_for_frame(

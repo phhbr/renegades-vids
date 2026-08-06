@@ -16,7 +16,13 @@ dependencies = [
 [project.optional-dependencies]
 # Pinned, not floated: detection is load-bearing and venues have no internet,
 # so an unexpected resolver bump must never change behaviour mid-tournament.
-detect = ["ultralytics==8.4.115", "torch==2.13.0", "torchvision==0.28.0"]
+detect = [
+    "ultralytics==8.4.115",
+    "torch==2.13.0",
+    "torchvision==0.28.0",
+    # ByteTrack's association step; Ultralytics does not pull it in itself.
+    "lap==0.5.12",
+]
 
 [project.scripts]
 playsplit = "playsplit.cli:app"

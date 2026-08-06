@@ -7,7 +7,13 @@ from pathlib import Path
 import numpy as np
 
 from . import detect, field
-from .cluster import ClusterConfig, FrameFeatures, features_for_frame, occupancy_map
+from .cluster import (
+    ClusterConfig,
+    FrameFeatures,
+    features_for_frame,
+    occupancy_map,
+    stationary_detections,
+)
 from .config import Config
 from .probe import ClipInfo
 from .roi import Band, estimate_band
@@ -76,7 +82,9 @@ def detections(
         data = np.load(cache)
         return detect.RawDetections(
             xs=data["xs"], ys=data["ys"], heights=data["heights"],
-            frame_index=data["frame_index"], frame_count=int(data["frame_count"]),
+            frame_index=data["frame_index"], track_id=data["track_id"],
+            jersey_hue=data["jersey_hue"], jersey_sat=data["jersey_sat"],
+            frame_count=int(data["frame_count"]),
             fps=float(data["fps"]), elapsed_s=float(data["elapsed_s"]),
         )
 
@@ -91,8 +99,9 @@ def detections(
     )
     np.savez_compressed(
         cache, xs=raw.xs, ys=raw.ys, heights=raw.heights,
-        frame_index=raw.frame_index, frame_count=raw.frame_count,
-        fps=raw.fps, elapsed_s=raw.elapsed_s,
+        frame_index=raw.frame_index, track_id=raw.track_id,
+        jersey_hue=raw.jersey_hue, jersey_sat=raw.jersey_sat,
+        frame_count=raw.frame_count, fps=raw.fps, elapsed_s=raw.elapsed_s,
     )
     return raw
 
@@ -111,18 +120,40 @@ def features(
     raw = detections(clip, analysis_dir, cfg, force=force, log=log)
     mask = _mask(clip, analysis_dir, force, log)
 
-    gated = mask.contains_many(raw.xs, raw.ys) if len(raw.xs) else np.array([], bool)
-    static_cells = occupancy_map(
-        raw.xs[gated], raw.ys[gated], raw.frame_count, cluster_cfg
+    if len(raw.xs) == 0:
+        return [], raw.realtime_factor
+
+    on_field = mask.contains_many(raw.xs, raw.ys)
+
+    # Suppress people who are not going anywhere. Per-track displacement is the
+    # better instrument in principle, but only when tracks live long enough to
+    # judge; at 5 fps in this crowd they do not, so the positional occupancy
+    # map is the default. Both reduce to the same idea, applied per identity or
+    # per location.
+    if raw.track_id.size and (raw.track_id >= 0).any():
+        parked = stationary_detections(
+            raw.xs, raw.ys, raw.heights, raw.track_id, raw.frame_index,
+            raw.fps, cluster_cfg,
+        )
+        static_cells: set[tuple[int, int]] = set()
+    else:
+        parked = np.zeros(len(raw.xs), dtype=bool)
+        static_cells = occupancy_map(
+            raw.xs[on_field], raw.ys[on_field], raw.frame_count, cluster_cfg
+        )
+    kept = on_field & ~parked
+    log(
+        f"      {len(raw.xs)} detections → {int(on_field.sum())} on field, "
+        f"{int(parked.sum())} parked, {len(static_cells)} static cells"
     )
-    log(f"      {len(static_cells)} stationary cells suppressed")
 
     rows: list[FrameFeatures] = []
     previous_centroid: float | None = None
     for index in range(raw.frame_count):
-        xs, ys = raw.frame(index)
+        selection = (raw.frame_index == index) & kept
         row = features_for_frame(
-            index / raw.fps, xs, ys, mask, cluster_cfg, previous_centroid, static_cells
+            index / raw.fps, raw.xs[selection], raw.ys[selection],
+            mask, cluster_cfg, previous_centroid, static_cells,
         )
         if row.valid:
             previous_centroid = row.centroid_x

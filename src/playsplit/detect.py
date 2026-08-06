@@ -39,10 +39,18 @@ class RawDetections:
     #: Foot points: bbox bottom-centre x, bbox bottom y.
     xs: np.ndarray
     ys: np.ndarray
-    #: Bounding-box heights, a proxy for distance from camera.
+    #: Bounding-box heights. Double as a local scale: a player is ~1.75 m, so
+    #: height in pixels converts displacement to metres at that image depth,
+    #: which matters because this camera has strong perspective foreshortening.
     heights: np.ndarray
     #: Index into the frame sequence for each detection.
     frame_index: np.ndarray
+    #: ByteTrack identity, or -1 where the tracker did not assign one.
+    track_id: np.ndarray
+    #: Mean jersey hue/saturation with grass suppressed. Passive metadata only
+    #: -- logged so the labels can later say whether it separates rosters.
+    jersey_hue: np.ndarray
+    jersey_sat: np.ndarray
     frame_count: int
     fps: float
     elapsed_s: float
@@ -117,44 +125,96 @@ def run(
         )
     model = YOLO(str(detect_cfg.weights))
 
-    all_x: list[np.ndarray] = []
-    all_y: list[np.ndarray] = []
-    all_h: list[np.ndarray] = []
-    all_i: list[np.ndarray] = []
+    columns: dict[str, list[np.ndarray]] = {
+        key: [] for key in ("x", "y", "h", "i", "id", "hue", "sat")
+    }
     count = 0
     started = time.time()
 
     for index, frame in enumerate(_frames_pipelined(path, fps, crop)):
         count = index + 1
-        boxes = model.predict(
-            frame,
-            imgsz=detect_cfg.imgsz,
-            conf=detect_cfg.conf,
-            classes=[0],
-            device=detect_cfg.device,
-            verbose=False,
-        )[0].boxes
+        # Tracking is opt-in; see DetectConfig.use_tracker for why it is off.
+        # Analysis fps is never raised for it -- that would blow the wall-clock
+        # budget, and fragmenting sprinters are harmless, since suppression
+        # only ever needs continuity for people standing still.
+        if detect_cfg.use_tracker:
+            result = model.track(
+                frame, imgsz=detect_cfg.imgsz, conf=detect_cfg.conf, classes=[0],
+                device=detect_cfg.device, tracker=detect_cfg.tracker,
+                persist=True, verbose=False,
+            )
+        else:
+            result = model.predict(
+                frame, imgsz=detect_cfg.imgsz, conf=detect_cfg.conf, classes=[0],
+                device=detect_cfg.device, verbose=False,
+            )
+        boxes = result[0].boxes
 
-        if len(boxes):
-            xyxy = boxes.xyxy.cpu().numpy()
-            # Foot point in *source* coordinates: bbox bottom-centre, shifted
-            # by the crop origin so it can be tested against the full-frame
-            # mask. Centres would admit anyone leaning over the touchline.
-            all_x.append((xyxy[:, 0] + xyxy[:, 2]) / 2 + crop.x)
-            all_y.append(xyxy[:, 3] + crop.y)
-            all_h.append(xyxy[:, 3] - xyxy[:, 1])
-            all_i.append(np.full(len(xyxy), index))
+        if not len(boxes):
+            if progress is not None:
+                progress(index)
+            continue
+
+        xyxy = boxes.xyxy.cpu().numpy()
+        # Foot point in *source* coordinates: bbox bottom-centre, shifted by
+        # the crop origin so it can be tested against the full-frame mask.
+        # Centres would admit anyone leaning over the touchline.
+        columns["x"].append((xyxy[:, 0] + xyxy[:, 2]) / 2 + crop.x)
+        columns["y"].append(xyxy[:, 3] + crop.y)
+        columns["h"].append(xyxy[:, 3] - xyxy[:, 1])
+        columns["i"].append(np.full(len(xyxy), index))
+        columns["id"].append(
+            boxes.id.cpu().numpy().astype(int)
+            if boxes.id is not None
+            else np.full(len(xyxy), -1)
+        )
+        hue, sat = _jersey_colour(frame, xyxy)
+        columns["hue"].append(hue)
+        columns["sat"].append(sat)
 
         if progress is not None:
             progress(index)
 
-    empty = np.array([], dtype=np.float64)
+    def stack(key: str, dtype=np.float64) -> np.ndarray:
+        parts = columns[key]
+        return np.concatenate(parts).astype(dtype) if parts else np.array([], dtype=dtype)
+
     return RawDetections(
-        xs=np.concatenate(all_x) if all_x else empty,
-        ys=np.concatenate(all_y) if all_y else empty,
-        heights=np.concatenate(all_h) if all_h else empty,
-        frame_index=np.concatenate(all_i).astype(int) if all_i else empty.astype(int),
-        frame_count=count,
-        fps=fps,
-        elapsed_s=time.time() - started,
+        xs=stack("x"), ys=stack("y"), heights=stack("h"),
+        frame_index=stack("i", int), track_id=stack("id", int),
+        jersey_hue=stack("hue"), jersey_sat=stack("sat"),
+        frame_count=count, fps=fps, elapsed_s=time.time() - started,
     )
+
+
+def _jersey_colour(frame: np.ndarray, xyxy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Mean hue and saturation of each detection's torso, grass suppressed.
+
+    Sampled from the upper-middle of the box, where a jersey is, and with
+    green pixels dropped so the pitch behind a thin player does not dominate.
+    Recorded as metadata only -- at 20-45 px tall these statistics are weak,
+    and at least one roster here wears green on green grass.
+    """
+    import cv2
+
+    height, width = frame.shape[:2]
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    hues = np.zeros(len(xyxy))
+    sats = np.zeros(len(xyxy))
+    for row, (x1, y1, x2, y2) in enumerate(xyxy):
+        cx = (x1 + x2) / 2
+        half = max((x2 - x1) / 4, 1.0)
+        top = y1 + (y2 - y1) * 0.2
+        bottom = y1 + (y2 - y1) * 0.55
+        patch = hsv[
+            max(int(top), 0) : min(int(bottom) + 1, height),
+            max(int(cx - half), 0) : min(int(cx + half) + 1, width),
+        ]
+        if patch.size == 0:
+            continue
+        flat = patch.reshape(-1, 3)
+        not_grass = ~((flat[:, 0] >= 30) & (flat[:, 0] <= 90) & (flat[:, 1] >= 60))
+        sample = flat[not_grass] if not_grass.any() else flat
+        hues[row] = float(sample[:, 0].mean())
+        sats[row] = float(sample[:, 1].mean())
+    return hues, sats
