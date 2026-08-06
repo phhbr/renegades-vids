@@ -1,9 +1,19 @@
-assets
+# Footage is 45 GB and never tracked. Directories are re-admitted so git can
+# descend into them, and hand-corrected ground truth IS tracked: it is the most
+# expensive artifact in the project -- hours of the user's time, unreproducible
+# by any amount of compute, and it was silently untracked until now.
+assets/**
+!assets/**/
+!assets/**/*__labels_corrected.csv
+
+# Generated per-game artifacts (caches, plots, thumbnails, cut plays) and the
+# repo-root figures are all reproducible from the footage plus the labels.
+/analysis/
+/plays/
+
 .venv/
 __pycache__/
 *.pyc
-analysis/
-plays/
 *.npy
 
 # models/ is deliberately NOT ignored: the YOLO weights are vendored so that
