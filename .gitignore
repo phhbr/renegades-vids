@@ -5,4 +5,6 @@ __pycache__/
 analysis/
 plays/
 *.npy
-yolo11n.pt
+
+# models/ is deliberately NOT ignored: the YOLO weights are vendored so that
+# Ultralytics never tries to auto-download them at a venue with no internet.
